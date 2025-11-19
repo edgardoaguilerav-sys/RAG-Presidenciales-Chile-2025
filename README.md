@@ -1,6 +1,6 @@
 
 # RAG Programas Presidenciales Chile 2025
-Sistema de consulta inteligente en R + Python que permite consultar los programas presidenciales chilenos 2025 mediante una arquitectura RAG (Retrieval-Augmented Generation). El modelo recupera fragmentos relevantes desde los PDFs oficiales, los pasa por FAISS y genera respuestas usando OpenAI.
+Sistema de consulta inteligente en R + Python que permite consultar los programas presidenciales chilenos 2025 mediante una arquitectura RAG (Retrieval-Augmented Generation). El modelo recupera fragmentos relevantes desde los PDFs subidos por los candidatos a su sitio web, los pasa por FAISS y genera respuestas usando OpenAI.
 
 ## Descripción general
 - Procesa documentos PDF de programas presidenciales.
