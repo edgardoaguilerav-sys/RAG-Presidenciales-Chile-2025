@@ -1,0 +1,6 @@
+^00_setup_env\.R$
+^test_rag_cli\.R$
+^.*\.Rproj$
+^\.Rproj\.user$
+^\.Rhistory$
+^.*\.pdf$

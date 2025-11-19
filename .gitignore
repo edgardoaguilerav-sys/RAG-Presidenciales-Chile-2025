@@ -1,0 +1,26 @@
+# Nunca subir claves ni configuración privada
+.Renviron
+openai_key
+*.env
+*.key
+
+# Índice FAISS y artefactos generados
+_rag_build_faiss/
+*.arrow
+*.faiss
+api_query_count.txt
+
+# Archivos temporales de R
+.Rhistory
+.RData
+.Rproj.user/
+
+# Librerías instaladas localmente
+x86_64-pc-linux-gnu-library/
+renv/library/
+.venv/
+.Rcheck/
+
+# Otros temporales comunes
+.DS_Store
+Thumbs.db
