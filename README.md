@@ -38,5 +38,7 @@ pandas
 ## Ejecución local
 
 1. Clonar el repositorio:
-```bash
-git clone https://github.com/TU_USUARIO/RAG-Programas-Presidenciales-2025.git
+   ```bash
+   git clone https://github.com/TU_USUARIO/RAG-Programas-Presidenciales-2025.git
+   cd RAG-Programas-Presidenciales-2025
+

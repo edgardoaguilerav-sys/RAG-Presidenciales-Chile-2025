@@ -1,7 +1,11 @@
 # ============================================================
-# test_rag_cli.R — RAG local + OpenAI (REST) usando bge-m3
-#   - Embeddings locales con sentence-transformers (BAAI/bge-m3)
-#   - Usa el entorno Python configurado en 00_setup_env.R
+# test_rag_cli.R — RAG local + FAISS + generación (OpenAI -> fallback Ollama)
+#   - Embeddings: mismo modelo usado en el índice FAISS (desde meta.json)
+#   - Recuperación: FAISS
+#   - Respuesta:
+#        1) OpenAI si OPENAI_API_KEY existe y la llamada funciona
+#        2) Si no, Ollama local (si está instalado y el server responde)
+#   - Formato respuesta: cada viñeta termina con (Programa X; Pág. N)
 # ============================================================
 
 suppressPackageStartupMessages({
@@ -10,190 +14,102 @@ suppressPackageStartupMessages({
   library(arrow)
   library(dplyr)
   library(glue)
-  library(tibble)
   library(stringr)
-  library(httr2)   # REST al API de OpenAI
+  library(httr2)
 })
 
-# -------------------------------------------------------------------
-# IMPORTANTE:
-# NO volvemos a fijar RETICULATE_PYTHON aquí.
-# Asumimos que ya corriste 00_setup_env.R en esta sesión,
-# que es quien llama use_python(...) con el entorno rag-faiss.
-# -------------------------------------------------------------------
-# Sys.setenv(RETICULATE_AUTOCONFIGURE = "FALSE")
-# NO: Sys.setenv(RETICULATE_PYTHON = "...")
+# ============================================================
+# 0) Python/conda: detectar conda y apuntar al env rag-faiss
+# (si reticulate ya inicializó otro Python en esta sesión: Session -> Restart R)
+# ============================================================
+env_name <- "rag-faiss"
 
-# --- Importes Python (solo para embeddings/FAISS) ---
-np    <- import("numpy", delay_load = FALSE, convert = TRUE)
-faiss <- import("faiss", delay_load = FALSE, convert = TRUE)
+cb <- tryCatch(reticulate::conda_binary(), error = function(e) NULL)
+if (is.null(cb)) stop("No se detectó conda. Ejecuta 00_setup_env.R primero.")
 
-# Modelo local (bge-m3 vía sentence-transformers)
-LOCAL_EMB_MODEL <- "BAAI/bge-m3"
+miniconda_dir <- normalizePath(dirname(dirname(cb)), winslash = "/")
+py_exe <- file.path(miniconda_dir, "envs", env_name, "python.exe")
+if (!file.exists(py_exe)) stop("No existe python.exe del env '", env_name, "': ", py_exe)
 
-# --- Rutas de tu build FAISS ---
+Sys.setenv(RETICULATE_MINICONDA_PATH = miniconda_dir)
+Sys.setenv(RETICULATE_PYTHON = py_exe)
+
+use_python(py_exe, required = TRUE)
+py_config()
+
+# ============================================================
+# 1) Rutas índice
+# ============================================================
 OUT_DIR   <- "C:/Users/LENOVO/Desktop/RAG Programas Presidenciales/_rag_build_faiss"
 META_FP   <- file.path(OUT_DIR, "meta.json")
 CHUNKS_FP <- file.path(OUT_DIR, "chunks.arrow")
 INDEX_FP  <- file.path(OUT_DIR, "index.faiss")
 
 stopifnot(file.exists(META_FP), file.exists(CHUNKS_FP), file.exists(INDEX_FP))
-meta <- jsonlite::read_json(META_FP)
+
+meta <- jsonlite::read_json(META_FP, simplifyVector = TRUE)
+
 PROGRAMS <- meta$programs
-cat("📚 Programas detectados en meta.json:", paste(PROGRAMS, collapse = ", "), "\n")
+cat("📚 Programas detectados:", paste(PROGRAMS, collapse = ", "), "\n")
 
-# ------------------------------------------------------------
-# Embeddings locales con sentence-transformers (BAAI/bge-m3)
-# ------------------------------------------------------------
+LOCAL_EMB_MODEL <- meta$emb$local_model
+if (is.null(LOCAL_EMB_MODEL) || !nzchar(LOCAL_EMB_MODEL)) {
+  stop("meta.json no trae emb.local_model. Usa el índice generado por tu 01 actualizado.")
+}
+cat("🧠 Embedding model (meta.json):", LOCAL_EMB_MODEL, "\n")
 
-# Embed de un solo texto
+# ============================================================
+# 2) Python: FAISS + SentenceTransformers
+# ============================================================
+np    <- import("numpy", convert = TRUE)
+faiss <- import("faiss", convert = TRUE)
+st    <- import("sentence_transformers", convert = TRUE)
+
+embedder <- st$SentenceTransformer(LOCAL_EMB_MODEL, device = "cpu")
+
+# ---- Embeddings robustos (evitan v[1, ] cuando viene 1D) ----
 embed_one <- function(text) {
-  py_code <- sprintf("
-from sentence_transformers import SentenceTransformer
-_model = SentenceTransformer('%s')
-_vecs = _model.encode([%s], normalize_embeddings=True)
-", LOCAL_EMB_MODEL, jsonlite::toJSON(as.character(text), auto_unbox = TRUE))
-  
-  reticulate::py_run_string(py_code, convert = FALSE)
-  as.numeric(reticulate::py_eval("_vecs[0].tolist()", convert = TRUE))
+  v <- embedder$encode(
+    as.character(text),
+    show_progress_bar = FALSE,
+    convert_to_numpy = TRUE,
+    normalize_embeddings = TRUE
+  )
+  dv <- dim(v)
+  if (is.null(dv) || length(dv) < 2) return(as.numeric(v))
+  as.numeric(v[1, , drop = TRUE])
 }
 
-# Embed de muchos textos (para re-ranking local)
-embed_many <- function(texts) {
+embed_many <- function(texts, batch_size = 64L) {
   texts <- as.character(texts)
-  py_code <- sprintf("
-from sentence_transformers import SentenceTransformer
-_model = SentenceTransformer('%s')
-_vecs = _model.encode(%s, normalize_embeddings=True)
-", LOCAL_EMB_MODEL, jsonlite::toJSON(texts, auto_unbox = TRUE))
-  
-  reticulate::py_run_string(py_code, convert = FALSE)
-  # Lista de vectores numéricos
-  reticulate::py_eval("_vecs.tolist()", convert = TRUE)
+  v <- embedder$encode(
+    texts,
+    batch_size = as.integer(batch_size),
+    show_progress_bar = FALSE,
+    convert_to_numpy = TRUE,
+    normalize_embeddings = TRUE
+  )
+  dv <- dim(v)
+  if (is.null(dv) || length(dv) < 2) return(matrix(as.numeric(v), nrow = 1))
+  as.matrix(v)
 }
 
-# Self-test opcional
-embed_selftest <- function() {
-  cat("\n🧠 Self-test sentence-transformers (bge-m3)...\n")
-  txts <- c("educación pública", "crecimiento económico", "seguridad ciudadana")
-  vlist <- embed_many(txts)
-  cat("✅ bge-m3 vía sentence-transformers funciona. Dimensiones:",
-      length(vlist), "x", length(vlist[[1]]), "\n")
-}
-
-# ------------------------------------------------------------
-# OCR smoke (por si alguno de los PDFs está escaneado)
-# ------------------------------------------------------------
-ocr_smoke <- function(doc_dir = meta$doc_dir, threshold_chars = 1000) {
-  if (is.null(doc_dir) || !dir.exists(doc_dir)) return(invisible(tibble()))
-  pdfs <- list.files(doc_dir, pattern = "\\.pdf$", full.names = TRUE)
-  tibble(
-    archivo = basename(pdfs),
-    chars_sin_esp = sapply(pdfs, function(f) {
-      txt <- tryCatch(pdftools::pdf_text(f), error = function(e) "")
-      nchar(gsub("\\s+", "", paste(txt, collapse = "")))
-    }),
-    ocr_recomendado = chars_sin_esp < threshold_chars
-  ) |>
-    arrange(desc(chars_sin_esp))
-}
-
-cat("\n🔎 Smoke OCR (posibles PDFs escaneados):\n")
-print(ocr_smoke())
-
-# ------------------------------------------------------------
-# Contador de consultas
-# ------------------------------------------------------------
-if (!exists(".ask_count", envir = .GlobalEnv)) .ask_count <<- 0L
-
-# ------------------------------------------------------------
-# Util: coseno
-# ------------------------------------------------------------
+# Util coseno (fallback rerank)
 cosine_sim <- function(a, b) {
   a <- as.numeric(a); b <- as.matrix(b)
   denom <- sqrt(sum(a*a)) * sqrt(rowSums(b*b))
   drop((b %*% a) / pmax(denom, 1e-12))
 }
 
-# ------------------------------------------------------------
-# Función principal: ask(candidate, question)
-# ------------------------------------------------------------
-ask <- function(candidate, question, k = 8L,
-                max_tokens = 700L,
-                model = "gpt-4o-mini") {
-  if (!candidate %in% PROGRAMS) {
-    stop(glue("Programa no válido. Opciones: {paste(PROGRAMS, collapse = ', ')}"))
-  }
+# ============================================================
+# 3) Backends de generación: OpenAI + Ollama
+# ============================================================
+openai_key_available <- function() nzchar(Sys.getenv("OPENAI_API_KEY", ""))
+
+generate_openai <- function(prompt, model = "gpt-4o-mini", max_tokens = 700L) {
   key <- Sys.getenv("OPENAI_API_KEY", "")
-  if (key == "") stop("Debe definir OPENAI_API_KEY")
+  if (!nzchar(key)) stop("OPENAI_API_KEY no definida.")
   
-  .ask_count <<- .ask_count + 1L
-  
-  # 1) embedding pregunta
-  cat(glue("\n🧭 Generando embedding para la pregunta sobre {candidate}...\n"))
-  q_vec <- embed_one(question)
-  q_np  <- np$expand_dims(np$array(q_vec, dtype = "float32"), 0L)
-  
-  # 2) FAISS + tabla chunks
-  index      <- faiss$read_index(INDEX_FP)
-  chunks_tbl <- arrow::read_feather(CHUNKS_FP)
-  
-  # 3) búsqueda amplia y FILTRO ESTRICTO por candidato
-  k_search <- min(nrow(chunks_tbl), max(256L, k * 16L))
-  res  <- index$search(q_np, as.integer(k_search))
-  idx  <- as.integer(res[[2]][1, ])
-  topk_global <- chunks_tbl[idx + 1, ] |>
-    dplyr::select(program, title, page_display, chunk)
-  
-  topk_prog <- dplyr::filter(topk_global, .data$program == candidate)
-  
-  # 4) plan B: re-rank local SOLO dentro del candidato
-  if (nrow(topk_prog) < k) {
-    prog_all <- dplyr::filter(chunks_tbl, .data$program == candidate)
-    cat(glue("🧪 Re-rankeando dentro de {candidate} con bge-m3 (local)...\n"))
-    embs <- embed_many(prog_all$chunk)
-    M    <- do.call(rbind, embs)
-    sims <- cosine_sim(q_vec, M)
-    ord  <- order(sims, decreasing = TRUE)
-    topk_prog <- prog_all[ord, , drop = FALSE]
-  }
-  topk_prog <- topk_prog[seq_len(min(k, nrow(topk_prog))), , drop = FALSE]
-  
-  topk_prog <- dplyr::filter(topk_prog, .data$program == candidate)
-  
-  if (nrow(topk_prog) == 0) {
-    msg <- glue("no se menciona en el programa de gobierno de {candidate}")
-    cat("\n⚠️ Aviso:", msg, "\n"); return(invisible(msg))
-  }
-  
-  cat("\n🔎 Fragmentos más relevantes (", candidate, "):\n", sep = "")
-  print(topk_prog)
-  
-  # 5) contexto con página visible
-  pg <- ifelse(is.na(topk_prog$page_display) | topk_prog$page_display == "",
-               "p.?", topk_prog$page_display)
-  ctx_lines    <- sprintf("[[%s]] %s", pg, topk_prog$chunk)
-  context_text <- paste(ctx_lines, collapse = "\n---\n")
-  
-  instruccion_formato <- glue(
-    "Responde en español con viñetas numeradas. DEBES entregar respuestas completas, no entregues ideas a medio desarrollar. ",
-    "Cada viñeta DEBE terminar con la cita (Pág. XX; Programa de {candidate}). ",
-    "No inventes páginas ni uses info fuera de los fragmentos. Las respuestas DEBEN relacionarse exclusivamente con la temática de la pregunta."
-  )
-  user_prompt <- paste0(
-    instruccion_formato, "\n\n",
-    "Pregunta del usuario: ", question, "\n\n",
-    "Fragmentos del programa de ", candidate, " (cada línea lleva su página entre [[ ]]):\n",
-    context_text
-  )
-  
-  # 6) limpiar proxies para evitar errores de red
-  for (v in c("HTTP_PROXY","http_proxy","HTTPS_PROXY","https_proxy",
-              "ALL_PROXY","all_proxy","OPENAI_PROXY","openai_proxy")) {
-    if (nzchar(Sys.getenv(v, ""))) Sys.unsetenv(v)
-  }
-  
-  # 7) llamada a OpenAI por REST
   req <- httr2::request("https://api.openai.com/v1/chat/completions") |>
     httr2::req_headers(
       Authorization = paste("Bearer", key),
@@ -202,26 +118,180 @@ ask <- function(candidate, question, k = 8L,
     httr2::req_body_json(list(
       model = model,
       messages = list(
-        list(role = "system",
-             content = "Eres un analista que cita con precisión los fragmentos proveídos."),
-        list(role = "user", content = user_prompt)
+        list(role = "system", content = "Responde solo con evidencia de los fragmentos. No inventes."),
+        list(role = "user", content = prompt)
       ),
       max_tokens = as.integer(max_tokens)
-    ))
-  resp <- httr2::req_perform(req)
-  j    <- httr2::resp_body_json(resp)
+    )) |>
+    httr2::req_timeout(60)
   
-  if (is.null(j$choices) || length(j$choices) == 0) {
-    msg <- glue("no se menciona en el programa de gobierno de {candidate}")
-    cat("\n⚠️ Aviso:", msg, "\n"); return(invisible(msg))
+  resp <- httr2::req_perform(req)
+  j <- httr2::resp_body_json(resp)
+  j$choices[[1]]$message$content
+}
+
+ollama_installed <- function() {
+  tryCatch({
+    status <- suppressWarnings(system("ollama --version", ignore.stdout = TRUE, ignore.stderr = TRUE))
+    isTRUE(status == 0)
+  }, error = function(e) FALSE)
+}
+
+ollama_server_up <- function() {
+  tryCatch({
+    httr2::request("http://localhost:11434/api/tags") |>
+      httr2::req_timeout(2) |>
+      httr2::req_perform()
+    TRUE
+  }, error = function(e) FALSE)
+}
+
+generate_ollama <- function(prompt, model = "llama3.2:3b") {
+  if (!ollama_installed()) stop("Ollama no está instalado (comando 'ollama' no encontrado).")
+  if (!ollama_server_up()) stop("Ollama está instalado, pero el servidor no responde en localhost:11434.")
+  
+  body <- list(model = model, prompt = prompt, stream = FALSE)
+  
+  resp <- httr2::request("http://localhost:11434/api/generate") |>
+    httr2::req_body_json(body) |>
+    httr2::req_timeout(120) |>
+    httr2::req_perform()
+  
+  j <- httr2::resp_body_json(resp)
+  j$response
+}
+
+# AUTO: intenta OpenAI si hay key; si falla o no hay key -> Ollama
+generate_answer <- function(prompt,
+                            openai_model = "gpt-4o-mini",
+                            openai_max_tokens = 700L,
+                            ollama_model = "llama3.2:3b") {
+  if (openai_key_available()) {
+    out <- tryCatch(
+      generate_openai(prompt, model = openai_model, max_tokens = openai_max_tokens),
+      error = function(e) {
+        message("⚠️ OpenAI falló: ", conditionMessage(e))
+        NULL
+      }
+    )
+    if (!is.null(out)) return(out)
+    message("➡️ Probando Ollama como fallback...")
+  } else {
+    message("ℹ️ No hay OPENAI_API_KEY. Usando Ollama...")
   }
-  ans <- j$choices[[1]]$message$content %||% ""
-  cat(glue("\n💬 Consulta número {.ask_count} — respuesta generada:\n"))
-  cat(ans, "\n")
+  
+  generate_ollama(prompt, model = ollama_model)
+}
+
+# ============================================================
+# 4) ASK principal
+# ============================================================
+ask <- function(candidate, question,
+                k = 8L,
+                openai_model = "gpt-4o-mini",
+                openai_max_tokens = 700L,
+                ollama_model = "llama3.2:3b") {
+  
+  if (!candidate %in% PROGRAMS) {
+    stop(glue("Programa no válido. Opciones: {paste(PROGRAMS, collapse=', ')}"))
+  }
+  
+  # 1) embedding de la pregunta (misma base que el índice)
+  q_vec <- embed_one(question)
+  q_np  <- np$expand_dims(np$array(q_vec, dtype = "float32"), 0L)
+  
+  # 2) cargar FAISS + chunks
+  index <- faiss$read_index(INDEX_FP)
+  chunks_tbl <- arrow::read_feather(CHUNKS_FP)
+  
+  # 3) búsqueda amplia
+  k_search <- min(nrow(chunks_tbl), max(256L, k * 16L))
+  res <- index$search(q_np, as.integer(k_search))
+  idx <- as.integer(res[[2]][1, ])
+  idx <- idx[idx >= 0]
+  
+  if (!length(idx)) {
+    msg <- "No se encontró evidencia en el índice para la pregunta (global)."
+    message(msg)
+    return(invisible(msg))
+  }
+  
+  topk_global <- chunks_tbl[idx + 1, ] |>
+    dplyr::select(program, title, page_display, chunk)
+  
+  topk_prog <- dplyr::filter(topk_global, program == candidate)
+  
+  # fallback rerank si hay pocos
+  if (nrow(topk_prog) < k) {
+    prog_all <- dplyr::filter(chunks_tbl, program == candidate)
+    if (nrow(prog_all) == 0) {
+      msg <- glue("No hay chunks para el programa de {candidate}.")
+      message(msg)
+      return(invisible(msg))
+    }
+    
+    M <- embed_many(prog_all$chunk, batch_size = 64L)
+    sims <- cosine_sim(q_vec, M)
+    ord <- order(sims, decreasing = TRUE)
+    topk_prog <- prog_all[ord, , drop = FALSE]
+  }
+  
+  topk_prog <- topk_prog[seq_len(min(k, nrow(topk_prog))), ]
+  if (nrow(topk_prog) == 0) {
+    msg <- glue("No se menciona este tema en el programa de {candidate}.")
+    message(msg)
+    return(invisible(msg))
+  }
+  
+  # Contexto con páginas (manteniendo [[p.X]] para que el modelo elija X)
+  pg_marker <- ifelse(is.na(topk_prog$page_display) | topk_prog$page_display == "",
+                      "p.?", topk_prog$page_display)
+  ctx_lines <- sprintf("[[%s]] %s", pg_marker, topk_prog$chunk)
+  context_text <- paste(ctx_lines, collapse = "\n---\n")
+  
+  # ============================================================
+  # PROMPT (AQUÍ empieza y termina el prompt)
+  # ============================================================
+  prompt <- glue("
+Responde en español con viñetas numeradas.
+
+Formato OBLIGATORIO:
+- Cada viñeta debe terminar EXACTAMENTE con: (Programa {candidate}; Pág. X)
+- Donde X es el número de página tomado del marcador [[p.X]] de los fragmentos usados.
+- Si usas más de una página en la misma viñeta, usa: (Programa {candidate}; Págs. X, Y)
+
+Reglas:
+- Usa SOLO información contenida en los fragmentos.
+- No inventes ni completes con conocimiento externo.
+- No incluyas marcadores [[p.X]] en el texto final: solo el formato (Programa ...; Pág. X).
+
+Pregunta del usuario: {question}
+
+Fragmentos recuperados (Programa de {candidate}):
+{context_text}
+")
+  # ============================================================
+  # FIN PROMPT
+  # ============================================================
+  
+  ans <- generate_answer(
+    prompt = prompt,
+    openai_model = openai_model,
+    openai_max_tokens = openai_max_tokens,
+    ollama_model = ollama_model
+  )
+  
+  cat("\n=====================\n")
+  cat("Respuesta generada:\n")
+  cat(ans)
+  cat("\n=====================\n")
+  
   invisible(ans)
 }
 
-# ------------------------------------------------------------
-# Ejemplo rápido (recuerda no dejar la API key fija en el script)
-# ------------------------------------------------------------
-ask("Kast", "¿Qué derechos humanos se ven comprometidos con su programa?")
+# ============================================================
+# Ejemplos (NO se ejecutan automáticamente):
+# ============================================================
+ask("Parisi", "¿Qué propone para el crecimiento económico?")
+# ask("Kast", "¿Qué propone sobre inmigración?")
+# ask("Jara", "¿Qué propone en salud?", ollama_model = "llama3.2:3b")
