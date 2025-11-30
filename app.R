@@ -1,6 +1,6 @@
 # ============================================================
 # app.R — Consultas a Programas Presidenciales (UI mejorada)
-# + feedback "Generando respuesta..."
+# + feedback "Generando respuesta usando el modelo X"
 # + deshabilitar botón mientras genera (shinyjs)
 # ============================================================
 
@@ -9,12 +9,8 @@ library(shinythemes)
 library(shinyjs)
 library(jsonlite)
 
-# Cargar la lógica RAG (define PROGRAMS y la función ask())
 source("test_rag_cli.R")
 
-# ------------------------------------------------------------
-# Candidatos para dropdown (robusto)
-# ------------------------------------------------------------
 OUT_DIR <- "C:/Users/LENOVO/Desktop/RAG Programas Presidenciales/_rag_build_faiss"
 META_FP <- file.path(OUT_DIR, "meta.json")
 
@@ -31,13 +27,9 @@ if (is.null(candidatos) || length(candidatos) == 0) {
   candidatos <- c("Jara", "Kast", "Kayser", "Matthei", "Parisi")
 }
 
-# ============================================================
-# UI
-# ============================================================
-
 ui <- fluidPage(
   theme = shinytheme("flatly"),
-  useShinyjs(),  # <-- habilita shinyjs
+  useShinyjs(),
   
   tags$head(
     tags$style(HTML("
@@ -128,13 +120,8 @@ ui <- fluidPage(
   )
 )
 
-# ============================================================
-# SERVER
-# ============================================================
-
 server <- function(input, output, session) {
   
-  # Estado de la respuesta
   respuesta_val <- reactiveVal("")
   
   output$respuesta <- renderText({
@@ -145,34 +132,45 @@ server <- function(input, output, session) {
     req(input$cand)
     req(input$preg)
     
-    # 1) Bloquear botón al inicio
+    # ---- Modelo esperado (solo para el mensaje mientras genera) ----
+    openai_model_default <- "gpt-4o-mini"
+    ollama_model_default <- "llama3.2:3b"
+    
+    using_openai <- nzchar(Sys.getenv("OPENAI_API_KEY", ""))
+    model_label <- if (using_openai) {
+      paste0("OpenAI: ", openai_model_default)
+    } else {
+      paste0("Ollama: ", ollama_model_default)
+    }
+    
+    # Mensaje único (no redundante)
+    msg <- paste0("Generando respuesta usando el modelo ", model_label, "…")
+    
     shinyjs::disable("go")
-    
-    # 2) Mostrar inmediatamente "generando..."
-    respuesta_val("⏳ Generando respuesta...")
-    
-    # 3) Procesar y re-habilitar al final (siempre)
+    respuesta_val(msg)
     on.exit(shinyjs::enable("go"), add = TRUE)
     
-    withProgress(message = "Generando respuesta...", value = 0, {
-      incProgress(0.2, detail = "Buscando fragmentos relevantes...")
+    withProgress(message = msg, value = 0, {
+      incProgress(0.2)  # sin detalle adicional (evita duplicar texto)
       Sys.sleep(0.05)
       
       out <- tryCatch({
-        incProgress(0.6, detail = "Generando texto con el modelo...")
-        ask(input$cand, input$preg)
+        incProgress(0.6)
+        ask(
+          input$cand,
+          input$preg,
+          print_console = FALSE,
+          openai_model = openai_model_default,
+          ollama_model = ollama_model_default
+        )
       }, error = function(e) {
         paste("⚠️ Error al procesar la consulta:\n", e$message)
       })
       
-      incProgress(1, detail = "Listo")
+      incProgress(1)
       respuesta_val(out)
     })
   })
 }
-
-# ============================================================
-# Lanzar app
-# ============================================================
 
 shinyApp(ui = ui, server = server)
