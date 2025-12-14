@@ -1,27 +1,78 @@
-# Nunca subir claves ni configuración privada
-.Renviron
-openai_key
-*.env
-*.key
-
-# Índice FAISS y artefactos generados
-_rag_build_faiss/
-*.arrow
-*.faiss
-api_query_count.txt
-
-# Archivos temporales de R
+# =========================
+# R / RStudio
+# =========================
+.Rproj.user/
 .Rhistory
 .RData
-.Rproj.user/
+.Ruserdata
+.Rprofile
+.Renviron
 
-# Librerías instaladas localmente
-x86_64-pc-linux-gnu-library/
-renv/library/
-.venv/
+# R package checks
 .Rcheck/
+*.tar.gz
 
-# Otros temporales comunes
+# =========================
+# OS / Editor
+# =========================
 .DS_Store
 Thumbs.db
+
+# VSCode / IDEs
+.vscode/
+.idea/
+
+# =========================
+# Local temp / scratch
+# =========================
 _local_tmp/
+tmp/
+temp/
+
+# =========================
+# Python / Reticulate cache
+# =========================
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.venv/
+venv/
+
+# Reticulate caches (a veces aparecen)
+.R.cache/
+.Rtmp*/
+
+# =========================
+# Shiny / logs
+# =========================
+*.log
+
+# =========================
+# Outputs del pipeline RAG
+# (NO versionar índices ni artefactos grandes)
+# =========================
+_rag_build_faiss/
+**/_rag_build_faiss/
+
+*.faiss
+*.arrow
+*.parquet
+*.sqlite
+*.db
+meta.json
+chunks.arrow
+idmap.arrow
+index.faiss
+
+# Si generas exports/diagnósticos
+exports/
+outputs/
+
+# =========================
+# Assets opcionales
+# =========================
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
