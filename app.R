@@ -1,7 +1,9 @@
 # ============================================================
 # app.R — Consultas a Programas Presidenciales (UI mejorada)
 # + feedback "Generando respuesta usando el modelo X"
-# + deshabilitar botón mientras genera (shinyjs)
+# + deshabilitar TODO mientras genera (shinyjs)
+# + respuesta sin cortes raros + sin scroll horizontal + más oscura
+# + NUEVO: sin scroll vertical interno (panel crece para ver todo)
 # ============================================================
 
 library(shiny)
@@ -37,6 +39,7 @@ ui <- fluidPage(
       .app-header { margin-bottom: 10px; }
       .app-title { font-weight: 700; font-size: 32px; margin-bottom: 5px; }
       .app-subtitle { color: #6c757d; font-size: 14px; margin-bottom: 25px; }
+
       .card-panel {
         background-color: #ffffff;
         border-radius: 12px;
@@ -45,19 +48,30 @@ ui <- fluidPage(
         margin-bottom: 20px;
       }
       .card-panel h4 { margin-top: 0; }
+      .btn-primary { font-weight: 600; width: 100%; }
+
+      /* ===== Ajustes Respuesta (sin cortes + sin scroll horizontal + más oscura + sin scroll interno) ===== */
       #respuesta {
-        white-space: pre-wrap;
-        word-wrap: break-word;
-        max-height: 520px;
-        overflow-y: auto;
-        overflow-x: hidden;
+        white-space: pre-wrap;      /* respeta saltos + envuelve por espacios */
+        word-break: normal;         /* NO corta palabras */
+        overflow-wrap: break-word;  /* si hay strings largos (URLs), rompe solo si es necesario */
+        hyphens: none;
+
+        max-height: none !important;  /* NUEVO: sin límite de alto */
+        overflow-y: visible !important; /* NUEVO: sin scroll vertical interno */
+        overflow-x: hidden !important;  /* CERO scroll horizontal */
+
         font-family: 'Courier New', monospace;
         font-size: 14px;
+        line-height: 1.45;
+
         background-color: #f8f9fa;
         border-radius: 8px;
         padding: 12px 14px;
+
+        color: #111827;  /* slate-900 */
+
       }
-      .btn-primary { font-weight: 600; width: 100%; }
     "))
   ),
   
@@ -133,8 +147,8 @@ server <- function(input, output, session) {
     req(input$preg)
     
     # ---- Modelo esperado (solo para el mensaje mientras genera) ----
-    openai_model_default <- "gpt-4o-mini"
-    ollama_model_default <- "llama3.2:3b"
+    openai_model_default  <- "gpt-4o-mini"
+    ollama_model_default  <- "llama3.2:3b"
     
     using_openai <- nzchar(Sys.getenv("OPENAI_API_KEY", ""))
     model_label <- if (using_openai) {
@@ -143,15 +157,22 @@ server <- function(input, output, session) {
       paste0("Ollama: ", ollama_model_default)
     }
     
-    # Mensaje único (no redundante)
     msg <- paste0("Generando respuesta usando el modelo ", model_label, "…")
     
+    # Bloqueo total: candidato + pregunta + botón
+    shinyjs::disable("cand")
+    shinyjs::disable("preg")
     shinyjs::disable("go")
     respuesta_val(msg)
-    on.exit(shinyjs::enable("go"), add = TRUE)
+    
+    on.exit({
+      shinyjs::enable("cand")
+      shinyjs::enable("preg")
+      shinyjs::enable("go")
+    }, add = TRUE)
     
     withProgress(message = msg, value = 0, {
-      incProgress(0.2)  # sin detalle adicional (evita duplicar texto)
+      incProgress(0.2)
       Sys.sleep(0.05)
       
       out <- tryCatch({
