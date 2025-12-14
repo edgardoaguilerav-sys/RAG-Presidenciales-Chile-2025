@@ -24,3 +24,4 @@ renv/library/
 # Otros temporales comunes
 .DS_Store
 Thumbs.db
+_local_tmp/
